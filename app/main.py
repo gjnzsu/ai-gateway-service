@@ -18,12 +18,10 @@ config_path = os.environ.get("LITELLM_CONFIG_PATH", "/app/config.yaml")
 with open(config_path) as f:
     config = yaml.safe_load(f)
 
-# Build the list of valid model names for /v1/models
+# Build model alias -> litellm model mapping (e.g. deepseek-chat -> deepseek/deepseek-chat)
 model_list = config.get("model_list", [])
-available_models = [m["model_name"] for m in model_list]
-
-# Configure LiteLLM's model list
-os.environ["LITELLM_MODEL_LIST"] = yaml.dump(model_list)
+model_alias_to_litellm_model = {m["model_name"]: m["litellm_params"]["model"] for m in model_list}
+available_models = list(model_alias_to_litellm_model.keys())
 
 
 @asynccontextmanager
@@ -83,20 +81,23 @@ async def chat_completions(request: Request):
     if not messages:
         raise HTTPException(status_code=400, detail="messages is required")
 
+    # Resolve model alias to LiteLLM model name (e.g. deepseek-chat -> deepseek/deepseek-chat)
+    resolved_model = model_alias_to_litellm_model.get(model, model)
+
     # Pass through extra kwargs (temperature, top_p, etc.)
     extra_kwargs = {k: v for k, v in body.items() if k not in ("model", "messages")}
 
     try:
         if stream:
             # Streaming response - LiteLLM returns proper SSE chunks
-            response = await acompletion(model=model, messages=messages, stream=True, **extra_kwargs)
+            response = await acompletion(model=resolved_model, messages=messages, stream=True, **extra_kwargs)
             return StreamingResponse(
                 _stream_response(response),
                 media_type="text/event-stream",
             )
         else:
             # Non-streaming response
-            response = await acompletion(model=model, messages=messages, **extra_kwargs)
+            response = await acompletion(model=resolved_model, messages=messages, **extra_kwargs)
             return response
 
     except litellm.exceptions.BadRequestError as e:
