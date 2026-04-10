@@ -1,0 +1,27 @@
+steps:
+  - name: "gcr.io/cloud-builders/docker"
+    args:
+      - build
+      - -t
+      - REGION-docker.pkg.dev/PROJECT_ID/ai-gateway-repo/ai-gateway-service:latest
+      - -t
+      - REGION-docker.pkg.dev/PROJECT_ID/ai-gateway-repo/ai-gateway-service:$COMMIT_SHA
+      - .
+    env:
+      - DOCKER_BUILDKIT=1
+
+  - name: "gcr.io/cloud-builders/docker"
+    args:
+      - push
+      - --all-tags
+      - REGION-docker.pkg.dev/PROJECT_ID/ai-gateway-repo/ai-gateway-service
+    env:
+      - DOCKER_BUILDKIT=1
+
+images:
+  - REGION-docker.pkg.dev/PROJECT_ID/ai-gateway-repo/ai-gateway-service:latest
+  - REGION-docker.pkg.dev/PROJECT_ID/ai-gateway-repo/ai-gateway-service:$COMMIT_SHA
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+  machineType: E2_HIGHCPU_8
