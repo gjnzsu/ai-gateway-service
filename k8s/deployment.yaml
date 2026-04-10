@@ -17,7 +17,7 @@ spec:
     spec:
       containers:
         - name: ai-gateway
-          image: REGION-docker.pkg.dev/PROJECT_ID/ai-gateway-repo/ai-gateway-service:latest
+          image: us-central1-docker.pkg.dev/gen-lang-client-0896070179/ai-gateway-repo/ai-gateway-service:latest
           imagePullPolicy: Always
           ports:
             - containerPort: 4000
