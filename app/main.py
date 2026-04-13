@@ -6,12 +6,17 @@ Provides OpenAI-compatible endpoints: /v1/chat/completions, /v1/models, /health
 """
 import os
 import yaml
+import logging
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import StreamingResponse
 import uvicorn
 import litellm
 from litellm import acompletion
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Load config.yaml
 config_path = os.environ.get("LITELLM_CONFIG_PATH", "/app/config.yaml")
@@ -83,6 +88,7 @@ async def chat_completions(request: Request):
 
     # Resolve model alias to LiteLLM model name (e.g. deepseek-chat -> deepseek/deepseek-chat)
     resolved_model = model_alias_to_litellm_model.get(model, model)
+    logger.info(f"[AI Gateway] Request received: model={model}, resolved_model={resolved_model}")
 
     # Pass through extra kwargs (temperature, top_p, etc.)
     extra_kwargs = {k: v for k, v in body.items() if k not in ("model", "messages")}
