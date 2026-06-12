@@ -7,9 +7,10 @@ Provides OpenAI-compatible endpoints: /v1/chat/completions, /v1/models, /health
 import os
 import yaml
 import logging
+from pathlib import Path
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 import uvicorn
 import litellm
 from litellm import acompletion
@@ -18,15 +19,45 @@ from litellm import acompletion
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+def resolve_config_path() -> Path:
+    explicit_path = os.environ.get("LITELLM_CONFIG_PATH")
+    if explicit_path:
+        return Path(explicit_path)
+
+    container_path = Path("/app/config.yaml")
+    if container_path.exists():
+        return container_path
+
+    return Path(__file__).resolve().parents[1] / "config.yaml"
+
+
+def _extract_env_var_reference(value):
+    if isinstance(value, str) and value.startswith("os.environ/"):
+        return value.split("/", 1)[1]
+    return None
+
+
 # Load config.yaml
-config_path = os.environ.get("LITELLM_CONFIG_PATH", "/app/config.yaml")
-with open(config_path) as f:
+config_path = resolve_config_path()
+with open(config_path, encoding="utf-8") as f:
     config = yaml.safe_load(f)
 
 # Build model alias -> litellm model mapping (e.g. deepseek-chat -> deepseek/deepseek-chat)
 model_list = config.get("model_list", [])
 model_alias_to_litellm_model = {m["model_name"]: m["litellm_params"]["model"] for m in model_list}
 available_models = list(model_alias_to_litellm_model.keys())
+required_env_vars = sorted(
+    {
+        env_var
+        for model_config in model_list
+        for env_var in [
+            _extract_env_var_reference(
+                model_config.get("litellm_params", {}).get("api_key")
+            )
+        ]
+        if env_var
+    }
+)
 
 
 @asynccontextmanager
@@ -55,6 +86,17 @@ async def health():
 
 @app.get("/readiness")
 async def readiness():
+    missing_env_vars = [
+        env_var for env_var in required_env_vars if not os.environ.get(env_var)
+    ]
+    if missing_env_vars:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "not_ready",
+                "missing_env_vars": missing_env_vars,
+            },
+        )
     return {"status": "ready"}
 
 
@@ -91,7 +133,7 @@ async def chat_completions(request: Request):
     logger.info(f"[AI Gateway] Request received: model={model}, resolved_model={resolved_model}")
 
     # Pass through extra kwargs (temperature, top_p, etc.)
-    extra_kwargs = {k: v for k, v in body.items() if k not in ("model", "messages")}
+    extra_kwargs = {k: v for k, v in body.items() if k not in ("model", "messages", "stream")}
 
     try:
         if stream:

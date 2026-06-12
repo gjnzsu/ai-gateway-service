@@ -1,106 +1,89 @@
 # AI Gateway Service
 
-**Single entry point for all AI model calls across the platform.**
+Single entry point for AI model calls across the platform.
 
-Instead of each service managing its own API keys and provider SDKs, all LLM requests route through this gateway. One place to manage keys, monitor usage, and swap models — without changing a line of client code.
+Instead of each service managing its own provider SDKs and API keys, services call this gateway through an OpenAI-compatible API. The gateway owns model aliases, provider routing, runtime credentials, and future AI-specific controls such as usage tracking, fallback, and policy.
 
-## What it does
+## What It Does
 
-- **Unified OpenAI-compatible API** — existing services call `/v1/chat/completions` just like normal. No SDK migration needed.
-- **Multi-provider routing** — automatically routes to OpenAI or DeepSeek based on the model name.
-- **Centralized key management** — API keys live in Kubernetes secrets, injected at runtime. No keys in code or config files.
-- **Observability-ready** — every request emits structured logs for tracing and metrics (OpenTelemetry hooks available for future dashboards).
+- OpenAI-compatible API: consumers call `/v1/chat/completions` and `/v1/models`.
+- Multi-provider routing: model aliases resolve to provider-qualified LiteLLM model names.
+- Centralized key management: provider API keys are injected through runtime environment variables.
+- Kubernetes-ready deployment: manifests are provided for an internal ClusterIP service.
 
-## Endpoint
+## Endpoints
 
 | Environment | URL |
-|-------------|-----|
-| **GKE (internal)** | `http://ai-gateway.ai-gateway.svc.cluster.local` |
-| **Local dev** | `http://localhost:4000` |
+| --- | --- |
+| GKE internal | `http://ai-gateway.ai-gateway.svc.cluster.local` |
+| Local dev | `http://localhost:4000` |
 
-> **Note:** The gateway is deployed as a ClusterIP service (internal-only). It is designed to be consumed by other services within the GKE cluster. To expose it externally, change the Service type to `LoadBalancer` in `k8s/service.yaml`.
+The Kubernetes service is internal-only by default. To expose it externally, update `k8s/service.yaml` and add the appropriate security controls before deployment.
 
 ## Available Models
 
-| Model | Provider | Use case |
-|-------|----------|----------|
-| `gpt-4o` | OpenAI | High-capability general purpose |
-| `gpt-4o-mini` | OpenAI | Fast, cost-effective tasks |
-| `deepseek-chat` | DeepSeek | Reasoning-heavy workloads, cost savings |
+| Model alias | Provider model | Use case |
+| --- | --- | --- |
+| `gpt-4o` | `openai/gpt-4o` | High-capability general purpose |
+| `gpt-4o-mini` | `openai/gpt-4o-mini` | Fast, cost-effective tasks |
+| `deepseek-chat` | `deepseek/deepseek-chat` | Cost-sensitive chat workloads |
 
-## Quick Start
+## Local Development
 
-### Consumer service migration
-
-To migrate an existing service to use the gateway, update its environment variables:
-
-```bash
-# Before (direct to OpenAI)
-OPENAI_API_KEY=sk-...
-OPENAI_BASE_URL=https://api.openai.com/v1
-
-# After (via AI Gateway)
-OPENAI_BASE_URL=http://ai-gateway.ai-gateway.svc.cluster.local/v1
-# API key is managed by the gateway — no need to set it in your service
-```
-
-The service keeps calling `https://api.openai.com/v1/chat/completions` in its code — just point `OPENAI_BASE_URL` at the gateway.
-
-### Local development
-
-```bash
-pip install -r requirements.txt
-export OPENAI_API_KEY=sk-...
-export DEEPSEEK_API_KEY=sk-...
+```powershell
+python -m pip install -r requirements.txt
+$env:OPENAI_API_KEY = "sk-..."
+$env:DEEPSEEK_API_KEY = "sk-..."
 python -m app.main
 ```
 
-### Health checks
+The app loads configuration in this order:
 
-```bash
-curl http://ai-gateway.ai-gateway.svc.cluster.local/health        # {"status": "ok"}
-curl http://ai-gateway.ai-gateway.svc.cluster.local/readiness     # checks downstream connectivity
-curl http://ai-gateway.ai-gateway.svc.cluster.local/v1/models     # lists available models
+1. `LITELLM_CONFIG_PATH`, when set
+2. `/app/config.yaml`, when running in the container
+3. local repository `config.yaml`
+
+## Health And Readiness
+
+```powershell
+curl.exe http://localhost:4000/health
+curl.exe http://localhost:4000/readiness
+curl.exe http://localhost:4000/v1/models
 ```
 
-### Test a chat completion
+`/health` checks process liveness and returns `{"status": "ok"}`.
 
-```bash
-curl -X POST http://ai-gateway.ai-gateway.svc.cluster.local/v1/chat/completions \
-  -H "Content-Type: application/json" \
+`/readiness` checks whether every API key environment variable referenced by `config.yaml` is set. It does not call downstream model providers.
+
+When keys are missing, readiness returns HTTP 503:
+
+```json
+{
+  "status": "not_ready",
+  "missing_env_vars": ["DEEPSEEK_API_KEY", "OPENAI_API_KEY"]
+}
+```
+
+## Chat Completion Example
+
+```powershell
+curl.exe -X POST http://localhost:4000/v1/chat/completions `
+  -H "Content-Type: application/json" `
   -d '{
     "model": "gpt-4o-mini",
     "messages": [{"role": "user", "content": "Say hello in 3 words"}]
   }'
 ```
 
-## Deployment
+## Consumer Service Migration
 
-### GKE (already deployed)
+Existing OpenAI-compatible clients can point their base URL at the gateway:
 
-```bash
-# Verify
-kubectl -n ai-gateway get pods
-kubectl -n ai-gateway get svc
-
-# Update keys (if needed)
-kubectl -n ai-gateway patch secret ai-gateway-secrets \
-  --patch '{"stringData":{"OPENAI_API_KEY":"sk-...","DEEPSEEK_API_KEY":"sk-..."}}'
-
-# Rolling restart to pick up new keys
-kubectl -n ai-gateway rollout restart deployment/ai-gateway
+```text
+OPENAI_BASE_URL=http://ai-gateway.ai-gateway.svc.cluster.local/v1
 ```
 
-### Redeploy after code changes
-
-```bash
-# Build and push via Cloud Build
-gcloud builds submit --config=cloudbuild.yaml
-
-# Rolling restart
-kubectl -n ai-gateway rollout restart deployment/ai-gateway
-kubectl -n ai-gateway rollout status deployment/ai-gateway
-```
+Consumer services do not need direct provider API keys when calls go through the gateway.
 
 ## Configuration
 
@@ -108,52 +91,101 @@ Model routing is defined in `config.yaml`:
 
 ```yaml
 model_list:
-  - model_name: gpt-4o           # consumer-facing name
+  - model_name: gpt-4o
     litellm_params:
-      model: openai/gpt-4o      # provider-qualified name
+      model: openai/gpt-4o
       api_key: os.environ/OPENAI_API_KEY
+
   - model_name: deepseek-chat
     litellm_params:
       model: deepseek/deepseek-chat
       api_key: os.environ/DEEPSEEK_API_KEY
 ```
 
-To add a new model, add an entry here and redeploy. No code changes needed.
+To add a model, add a new `model_list` entry and redeploy.
+
+## Kubernetes Deployment
+
+```powershell
+kubectl apply -f k8s/namespace.yaml
+kubectl -n ai-gateway create secret generic ai-gateway-secrets `
+  --from-literal=OPENAI_API_KEY="sk-..." `
+  --from-literal=DEEPSEEK_API_KEY="sk-..."
+kubectl apply -f k8s/deployment.yaml
+kubectl apply -f k8s/service.yaml
+```
+
+Use `k8s/secret.yaml.template` only as a local reference. Do not commit real secrets.
+
+To rotate keys:
+
+```powershell
+kubectl -n ai-gateway patch secret ai-gateway-secrets `
+  --patch '{"stringData":{"OPENAI_API_KEY":"sk-...","DEEPSEEK_API_KEY":"sk-..."}}'
+kubectl -n ai-gateway rollout restart deployment/ai-gateway
+```
+
+## Build And Redeploy
+
+```powershell
+gcloud builds submit --config=cloudbuild.yaml
+kubectl -n ai-gateway rollout restart deployment/ai-gateway
+kubectl -n ai-gateway rollout status deployment/ai-gateway
+```
+
+## Tests
+
+```powershell
+python -m pip install -r requirements.txt
+pytest -q
+```
+
+The tests run against the FastAPI app in-process. They do not require a local Uvicorn server or real provider credentials.
 
 ## Architecture
 
-```
-┌─────────────────────┐     ┌──────────────────┐     ┌─────────────┐
-│  ai-market-studio   │────▶│  AI Gateway      │────▶│  OpenAI     │
-│  (consumer service) │     │  ClusterIP:80    │     │             │
-└─────────────────────┘     └──────────────────┘     └─────────────┘
-                                   │
-                                   │ (model routing by name prefix)
-                                   ▼
-                             ┌─────────────┐
-                             │  DeepSeek   │
-                             └─────────────┘
+```text
+consumer service
+      |
+      v
+ai-gateway-service
+      |
+      +-- openai/gpt-4o
+      +-- openai/gpt-4o-mini
+      +-- deepseek/deepseek-chat
 ```
 
-## File structure
+Future production phases may place Kong Gateway in front of this service:
 
+```text
+consumer service -> Kong Gateway -> ai-gateway-service -> model providers
 ```
+
+Kong would own generic API gateway concerns such as auth, rate limiting, ingress routing, and request IDs. This service would continue to own AI-specific concerns such as model aliases, provider routing, cost tracking, fallback, and governance.
+
+## File Structure
+
+```text
 ai-gateway-service/
-├── app/
-│   ├── __init__.py
-│   └── main.py           # Custom FastAPI + LiteLLM proxy server
-├── tests/
-│   ├── conftest.py
-│   ├── test_health.py
-│   └── test_routing.py
-├── k8s/
-│   ├── namespace.yaml     # ai-gateway namespace
-│   ├── deployment.yaml    # 2 replicas, resource limits, probes
-│   ├── service.yaml      # ClusterIP :80
-│   └── secret.yaml        # API keys (injected at runtime)
-├── config.yaml            # Model routing config
-├── requirements.txt       # Python dependencies
-├── Dockerfile
-├── cloudbuild.yaml       # GCP Cloud Build CI/CD
-└── README.md
+  app/
+    __init__.py
+    main.py
+  tests/
+    conftest.py
+    test_config.py
+    test_health.py
+    test_routing.py
+  k8s/
+    namespace.yaml
+    deployment.yaml
+    service.yaml
+    secret.yaml.template
+  openspec/
+    changes/
+      stabilize-ai-gateway-foundation/
+  config.yaml
+  requirements.txt
+  Dockerfile
+  cloudbuild.yaml
+  README.md
 ```
