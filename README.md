@@ -152,6 +152,40 @@ kubectl -n ai-gateway rollout restart deployment/ai-gateway
 kubectl -n ai-gateway rollout status deployment/ai-gateway
 ```
 
+## Kong Gateway POC
+
+The Kong POC is optional and local-only. It does not change the direct gateway path on `localhost:4000`, and it does not require existing consumers to send new headers or auth credentials.
+
+Run the POC:
+
+```powershell
+docker compose -f docker-compose.kong.yml up --build
+```
+
+Kong listens on `localhost:8000` and forwards to `ai-gateway-service` on `localhost:4000`.
+
+Verify proxy routing:
+
+```powershell
+curl.exe http://localhost:8000/health
+curl.exe http://localhost:8000/readiness
+curl.exe http://localhost:8000/v1/models
+```
+
+Test a chat completion through Kong:
+
+```powershell
+curl.exe -X POST http://localhost:8000/v1/chat/completions `
+  -H "Content-Type: application/json" `
+  -H "X-Consumer-Service: ai-market-studio" `
+  -d '{
+    "model": "gpt-4o-mini",
+    "messages": [{"role": "user", "content": "Say hello in 3 words"}]
+  }'
+```
+
+The POC uses Kong DB-less mode with declarative config in `kong/kong.yml`. It enables request correlation via `X-Request-ID` and a generous local rate limit for demonstration. Auth is intentionally not enabled in this phase because that would be a breaking change for current consumers.
+
 ## Tests
 
 ```powershell
@@ -199,10 +233,15 @@ ai-gateway-service/
     deployment.yaml
     service.yaml
     secret.yaml.template
+  kong/
+    kong.yml
   openspec/
     changes/
       stabilize-ai-gateway-foundation/
+      add-ai-gateway-observability/
+      add-kong-gateway-poc/
   config.yaml
+  docker-compose.kong.yml
   requirements.txt
   Dockerfile
   cloudbuild.yaml
