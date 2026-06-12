@@ -141,6 +141,38 @@ model_list:
 
 To add a model, add a new `model_list` entry and redeploy.
 
+## Consumer Model Policy
+
+Consumer model policy is currently **log-only**. The gateway evaluates requested model aliases against configured consumer allowlists and adds the result to structured logs, but it does not block requests.
+
+Policy is keyed by `X-Consumer-Service`. If the header is missing or unknown, the `default` policy is used.
+
+Example:
+
+```yaml
+consumer_policies:
+  default:
+    mode: log_only
+    allowed_models:
+      - gpt-4o-mini
+      - deepseek-chat
+
+  ai-market-studio:
+    mode: log_only
+    allowed_models:
+      - gpt-4o
+      - gpt-4o-mini
+      - deepseek-chat
+```
+
+Structured logs include:
+
+- `policy_mode`
+- `policy_allowed`
+- `policy_reason`
+
+This phase is intentionally non-breaking. Enforcement, quotas, budgets, auth, and Kong consumer mapping are later phases.
+
 ## Kubernetes Deployment
 
 ```powershell
@@ -259,6 +291,7 @@ ai-gateway-service/
       add-ai-gateway-observability/
       add-kong-gateway-poc/
       integrate-observability-service/
+      add-consumer-model-policy/
   config.yaml
   docker-compose.kong.yml
   requirements.txt

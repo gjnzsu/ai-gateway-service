@@ -50,6 +50,29 @@ def _consumer_from(request: Request) -> str:
     return request.headers.get("x-consumer-service") or "unknown"
 
 
+def _consumer_policies():
+    return config.get("consumer_policies", {})
+
+
+def _policy_for_consumer(consumer: str):
+    policies = _consumer_policies()
+    return policies.get(consumer) or policies.get("default") or {
+        "mode": "log_only",
+        "allowed_models": available_models,
+    }
+
+
+def _evaluate_consumer_policy(consumer: str, model):
+    policy = _policy_for_consumer(consumer)
+    allowed_models = policy.get("allowed_models", [])
+    allowed = model in allowed_models
+    return {
+        "mode": "log_only",
+        "allowed": allowed,
+        "reason": "model_allowed" if allowed else "model_not_allowed",
+    }
+
+
 def _usage_from_response(response):
     usage = None
     if isinstance(response, dict):
@@ -152,6 +175,7 @@ def _log_chat_completion(
     started_at: float,
     error_type=None,
     usage=None,
+    policy_decision=None,
 ):
     payload = {
         "event": "chat_completion",
@@ -164,6 +188,10 @@ def _log_chat_completion(
         "error_type": error_type,
         "usage": usage,
     }
+    if policy_decision:
+        payload["policy_mode"] = policy_decision["mode"]
+        payload["policy_allowed"] = policy_decision["allowed"]
+        payload["policy_reason"] = policy_decision["reason"]
     logger.info(json.dumps(payload, sort_keys=True))
 
 
@@ -257,6 +285,7 @@ async def chat_completions(request: Request):
     stream = body.get("stream", False)
 
     if not model:
+        policy_decision = _evaluate_consumer_policy(consumer, None)
         _log_chat_completion(
             request_id=request_id,
             consumer=consumer,
@@ -265,11 +294,13 @@ async def chat_completions(request: Request):
             status_code=400,
             started_at=started_at,
             error_type="validation_error",
+            policy_decision=policy_decision,
         )
         raise HTTPException(status_code=400, detail="model is required")
 
     # Resolve model alias to LiteLLM model name (e.g. deepseek-chat -> deepseek/deepseek-chat)
     resolved_model = model_alias_to_litellm_model.get(model, model)
+    policy_decision = _evaluate_consumer_policy(consumer, model)
 
     if not messages:
         _log_chat_completion(
@@ -280,6 +311,7 @@ async def chat_completions(request: Request):
             status_code=400,
             started_at=started_at,
             error_type="validation_error",
+            policy_decision=policy_decision,
         )
         raise HTTPException(status_code=400, detail="messages is required")
 
@@ -303,6 +335,7 @@ async def chat_completions(request: Request):
                 resolved_model=resolved_model,
                 status_code=200,
                 started_at=started_at,
+                policy_decision=policy_decision,
             )
             return StreamingResponse(
                 _stream_response(response),
@@ -327,6 +360,7 @@ async def chat_completions(request: Request):
                 status_code=200,
                 started_at=started_at,
                 usage=usage,
+                policy_decision=policy_decision,
             )
             return response
 
@@ -346,6 +380,7 @@ async def chat_completions(request: Request):
             status_code=400,
             started_at=started_at,
             error_type="bad_request",
+            policy_decision=policy_decision,
         )
         raise HTTPException(status_code=400, detail=str(e))
     except litellm.exceptions.AuthenticationError as e:
@@ -364,6 +399,7 @@ async def chat_completions(request: Request):
             status_code=401,
             started_at=started_at,
             error_type="authentication_error",
+            policy_decision=policy_decision,
         )
         raise HTTPException(status_code=401, detail=str(e))
     except litellm.exceptions.RateLimitError as e:
@@ -382,6 +418,7 @@ async def chat_completions(request: Request):
             status_code=429,
             started_at=started_at,
             error_type="rate_limit",
+            policy_decision=policy_decision,
         )
         raise HTTPException(status_code=429, detail=str(e))
     except litellm.exceptions.APIError as e:
@@ -400,6 +437,7 @@ async def chat_completions(request: Request):
             status_code=500,
             started_at=started_at,
             error_type="api_error",
+            policy_decision=policy_decision,
         )
         raise HTTPException(status_code=500, detail=str(e))
     except Exception as e:
@@ -418,6 +456,7 @@ async def chat_completions(request: Request):
             status_code=500,
             started_at=started_at,
             error_type="internal_error",
+            policy_decision=policy_decision,
         )
         raise HTTPException(status_code=500, detail=f"Internal error: {str(e)}")
 
