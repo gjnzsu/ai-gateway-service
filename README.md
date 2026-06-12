@@ -104,6 +104,24 @@ Clients can send `X-Consumer-Service` to identify the calling service. If it is 
 
 These headers are optional. Existing consumers, including `ai-market-studio`, can continue using the same OpenAI-compatible request shape.
 
+When `OBSERVABILITY_URL` is configured, the gateway also sends `llm_call` metrics to the existing AI SRE observability service:
+
+```text
+ai-gateway-service -> ai-sre-observability /ingest -> /metrics -> Prometheus -> Grafana
+```
+
+Environment variables:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `OBSERVABILITY_URL` | unset | Enables metric ingestion when set, for example `http://ai-sre-observability.default.svc.cluster.local:8080` |
+| `OBSERVABILITY_SERVICE_NAME` | `ai-gateway-service` | Service label used in Prometheus/Grafana metrics |
+| `OBSERVABILITY_TIMEOUT_SECONDS` | `2` | Short timeout for fail-open metric ingestion |
+
+Metric ingestion is fail-open. If the observability service is unavailable, chat completion responses are preserved and the gateway logs a warning.
+
+The existing Grafana LLM Cost & Usage dashboard can show gateway request count, latency, token usage, errors, and cost after metrics reach `ai-sre-observability`. A Grafana log dashboard would require a log backend such as Loki; this repo currently emits structured JSON logs but does not provision Loki.
+
 ## Configuration
 
 Model routing is defined in `config.yaml`:
@@ -240,6 +258,7 @@ ai-gateway-service/
       stabilize-ai-gateway-foundation/
       add-ai-gateway-observability/
       add-kong-gateway-poc/
+      integrate-observability-service/
   config.yaml
   docker-compose.kong.yml
   requirements.txt

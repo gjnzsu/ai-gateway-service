@@ -13,6 +13,7 @@ from pathlib import Path
 from contextlib import asynccontextmanager
 
 import yaml
+import httpx
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
 import uvicorn
@@ -64,10 +65,81 @@ def _usage_from_response(response):
         usage = dict(usage)
 
     return {
-        "prompt_tokens": usage.get("prompt_tokens"),
-        "completion_tokens": usage.get("completion_tokens"),
-        "total_tokens": usage.get("total_tokens"),
+        "prompt_tokens": usage.get("prompt_tokens") or 0,
+        "completion_tokens": usage.get("completion_tokens") or 0,
+        "total_tokens": usage.get("total_tokens") or 0,
     }
+
+
+def _provider_and_model_from(resolved_model):
+    if isinstance(resolved_model, str) and "/" in resolved_model:
+        provider, model = resolved_model.split("/", 1)
+        return provider, model
+    return "unknown", resolved_model or "unknown"
+
+
+def _observability_url():
+    return os.environ.get("OBSERVABILITY_URL")
+
+
+def _observability_service_name():
+    return os.environ.get("OBSERVABILITY_SERVICE_NAME", "ai-gateway-service")
+
+
+def _observability_timeout_seconds():
+    return float(os.environ.get("OBSERVABILITY_TIMEOUT_SECONDS", "2"))
+
+
+def _build_llm_call_metric(
+    *,
+    request_id: str,
+    resolved_model,
+    started_at: float,
+    status: str,
+    error_type=None,
+    usage=None,
+):
+    provider, model = _provider_and_model_from(resolved_model)
+    usage = usage or {}
+    return {
+        "service_name": _observability_service_name(),
+        "metric_type": "llm_call",
+        "trace_id": request_id,
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "data": {
+            "provider": provider,
+            "model": model,
+            "prompt_tokens": usage.get("prompt_tokens") or 0,
+            "completion_tokens": usage.get("completion_tokens") or 0,
+            "duration_seconds": max(time.perf_counter() - started_at, 0),
+            "status": status,
+            "error_type": error_type,
+        },
+    }
+
+
+async def _post_observability_metric(payload):
+    observability_url = _observability_url()
+    if not observability_url:
+        return
+
+    async with httpx.AsyncClient(timeout=_observability_timeout_seconds()) as client:
+        response = await client.post(
+            f"{observability_url.rstrip('/')}/ingest",
+            json=payload,
+        )
+        response.raise_for_status()
+
+
+async def _send_observability_metric(**kwargs):
+    if not _observability_url():
+        return
+
+    payload = _build_llm_call_metric(**kwargs)
+    try:
+        await _post_observability_metric(payload)
+    except Exception as exc:
+        logger.warning("Failed to send observability metric: %s", exc)
 
 
 def _log_chat_completion(
@@ -218,6 +290,12 @@ async def chat_completions(request: Request):
         if stream:
             # Streaming response - LiteLLM returns proper SSE chunks
             response = await acompletion(model=resolved_model, messages=messages, stream=True, **extra_kwargs)
+            await _send_observability_metric(
+                request_id=request_id,
+                resolved_model=resolved_model,
+                started_at=started_at,
+                status="success",
+            )
             _log_chat_completion(
                 request_id=request_id,
                 consumer=consumer,
@@ -233,6 +311,14 @@ async def chat_completions(request: Request):
         else:
             # Non-streaming response
             response = await acompletion(model=resolved_model, messages=messages, **extra_kwargs)
+            usage = _usage_from_response(response)
+            await _send_observability_metric(
+                request_id=request_id,
+                resolved_model=resolved_model,
+                started_at=started_at,
+                status="success",
+                usage=usage,
+            )
             _log_chat_completion(
                 request_id=request_id,
                 consumer=consumer,
@@ -240,11 +326,18 @@ async def chat_completions(request: Request):
                 resolved_model=resolved_model,
                 status_code=200,
                 started_at=started_at,
-                usage=_usage_from_response(response),
+                usage=usage,
             )
             return response
 
     except litellm.exceptions.BadRequestError as e:
+        await _send_observability_metric(
+            request_id=request_id,
+            resolved_model=resolved_model,
+            started_at=started_at,
+            status="error",
+            error_type="bad_request",
+        )
         _log_chat_completion(
             request_id=request_id,
             consumer=consumer,
@@ -256,6 +349,13 @@ async def chat_completions(request: Request):
         )
         raise HTTPException(status_code=400, detail=str(e))
     except litellm.exceptions.AuthenticationError as e:
+        await _send_observability_metric(
+            request_id=request_id,
+            resolved_model=resolved_model,
+            started_at=started_at,
+            status="error",
+            error_type="authentication_error",
+        )
         _log_chat_completion(
             request_id=request_id,
             consumer=consumer,
@@ -267,6 +367,13 @@ async def chat_completions(request: Request):
         )
         raise HTTPException(status_code=401, detail=str(e))
     except litellm.exceptions.RateLimitError as e:
+        await _send_observability_metric(
+            request_id=request_id,
+            resolved_model=resolved_model,
+            started_at=started_at,
+            status="error",
+            error_type="rate_limit",
+        )
         _log_chat_completion(
             request_id=request_id,
             consumer=consumer,
@@ -278,6 +385,13 @@ async def chat_completions(request: Request):
         )
         raise HTTPException(status_code=429, detail=str(e))
     except litellm.exceptions.APIError as e:
+        await _send_observability_metric(
+            request_id=request_id,
+            resolved_model=resolved_model,
+            started_at=started_at,
+            status="error",
+            error_type="api_error",
+        )
         _log_chat_completion(
             request_id=request_id,
             consumer=consumer,
@@ -289,6 +403,13 @@ async def chat_completions(request: Request):
         )
         raise HTTPException(status_code=500, detail=str(e))
     except Exception as e:
+        await _send_observability_metric(
+            request_id=request_id,
+            resolved_model=resolved_model,
+            started_at=started_at,
+            status="error",
+            error_type="internal_error",
+        )
         _log_chat_completion(
             request_id=request_id,
             consumer=consumer,

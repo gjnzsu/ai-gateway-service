@@ -32,6 +32,12 @@ spec:
                 secretKeyRef:
                   name: ai-gateway-secrets
                   key: DEEPSEEK_API_KEY
+            - name: OBSERVABILITY_URL
+              value: "http://ai-sre-observability.default.svc.cluster.local:8080"
+            - name: OBSERVABILITY_SERVICE_NAME
+              value: "ai-gateway-service"
+            - name: OBSERVABILITY_TIMEOUT_SECONDS
+              value: "2"
           resources:
             requests:
               cpu: "500m"
