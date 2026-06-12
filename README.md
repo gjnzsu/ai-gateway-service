@@ -85,6 +85,25 @@ OPENAI_BASE_URL=http://ai-gateway.ai-gateway.svc.cluster.local/v1
 
 Consumer services do not need direct provider API keys when calls go through the gateway.
 
+## Observability
+
+Each `/v1/chat/completions` request emits one structured JSON log event with metadata such as:
+
+- `request_id`
+- `consumer`
+- `model`
+- `resolved_model`
+- `status_code`
+- `latency_ms`
+- `error_type`
+- `usage`, when the provider response includes token usage
+
+Clients can send `X-Request-ID` to correlate logs across services. If it is absent, the gateway generates one.
+
+Clients can send `X-Consumer-Service` to identify the calling service. If it is absent, the gateway logs `consumer` as `unknown`.
+
+These headers are optional. Existing consumers, including `ai-market-studio`, can continue using the same OpenAI-compatible request shape.
+
 ## Configuration
 
 Model routing is defined in `config.yaml`:
