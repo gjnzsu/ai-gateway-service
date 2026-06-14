@@ -32,5 +32,18 @@ consumer_policies:
       - gpt-4o-mini
       - deepseek-chat
 
+reliability:
+  timeout_seconds: 30
+  retry:
+    max_attempts: 2
+    backoff_seconds: 0.1
+  circuit_breaker:
+    enabled: true
+    failure_threshold: 2
+    cooldown_seconds: 30
+  fallbacks:
+    gpt-4o:
+      - gpt-4o-mini
+
 environment: gke
 port: 4000

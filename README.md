@@ -173,6 +173,56 @@ Structured logs include:
 
 This phase is intentionally non-breaking. Enforcement, quotas, budgets, auth, and Kong consumer mapping are later phases.
 
+## Provider Reliability
+
+Provider reliability is configured in `config.yaml` under `reliability`.
+
+```yaml
+reliability:
+  timeout_seconds: 30
+  retry:
+    max_attempts: 2
+    backoff_seconds: 0.1
+  circuit_breaker:
+    enabled: true
+    failure_threshold: 2
+    cooldown_seconds: 30
+  fallbacks:
+    gpt-4o:
+      - gpt-4o-mini
+```
+
+Behavior:
+
+- Provider calls are wrapped with a timeout.
+- Failed provider calls are retried with bounded attempts.
+- Configured fallback aliases are tried when the primary model fails or its circuit is open.
+- Circuit breaker state is tracked per resolved provider model, for example `openai/gpt-4o`.
+- After cooldown, the next real request becomes the half-open probe.
+- Successful probes close the circuit; failed probes reopen it.
+
+Structured chat completion logs include reliability metadata when available:
+
+```json
+{
+  "reliability": {
+    "selected_model_alias": "gpt-4o-mini",
+    "selected_resolved_model": "openai/gpt-4o-mini",
+    "fallback_from_model": "openai/gpt-4o",
+    "attempt_count": 3,
+    "circuit_state": "closed"
+  }
+}
+```
+
+Current limits:
+
+- Circuit breaker state is in-memory per gateway pod.
+- There is no cross-pod shared circuit state.
+- There are no background health probes.
+- Streaming fallback only applies before the stream response starts.
+- Retry classification is intentionally simple and bounded.
+
 ## Kubernetes Deployment
 
 ```powershell
@@ -292,6 +342,7 @@ ai-gateway-service/
       add-kong-gateway-poc/
       integrate-observability-service/
       add-consumer-model-policy/
+      add-provider-reliability-layer/
   config.yaml
   docker-compose.kong.yml
   requirements.txt

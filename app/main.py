@@ -4,6 +4,7 @@ AI Gateway Service - LiteLLM Proxy Server
 A minimal FastAPI server that routes LLM requests through LiteLLM.
 Provides OpenAI-compatible endpoints: /v1/chat/completions, /v1/models, /health
 """
+import asyncio
 import json
 import os
 import logging
@@ -71,6 +72,162 @@ def _evaluate_consumer_policy(consumer: str, model):
         "allowed": allowed,
         "reason": "model_allowed" if allowed else "model_not_allowed",
     }
+
+
+def _reliability_config():
+    return config.get("reliability", {})
+
+
+def _provider_timeout_seconds():
+    return float(_reliability_config().get("timeout_seconds", 30))
+
+
+def _retry_config():
+    return _reliability_config().get("retry", {})
+
+
+def _max_attempts():
+    return int(_retry_config().get("max_attempts", 1))
+
+
+def _retry_backoff_seconds():
+    return float(_retry_config().get("backoff_seconds", 0))
+
+
+def _circuit_config():
+    return _reliability_config().get("circuit_breaker", {})
+
+
+def _circuit_enabled():
+    return bool(_circuit_config().get("enabled", False))
+
+
+def _failure_threshold():
+    return int(_circuit_config().get("failure_threshold", 3))
+
+
+def _circuit_cooldown_seconds():
+    return float(_circuit_config().get("cooldown_seconds", 30))
+
+
+def _fallback_aliases_for(model_alias):
+    return _reliability_config().get("fallbacks", {}).get(model_alias, [])
+
+
+_circuit_breakers = {}
+
+
+def _circuit_for(resolved_model):
+    return _circuit_breakers.setdefault(
+        resolved_model,
+        {
+            "state": "closed",
+            "failure_count": 0,
+            "opened_at": None,
+        },
+    )
+
+
+def _open_circuit(resolved_model, opened_at=None):
+    circuit = _circuit_for(resolved_model)
+    circuit["state"] = "open"
+    circuit["failure_count"] = _failure_threshold()
+    circuit["opened_at"] = time.time() if opened_at is None else opened_at
+
+
+def _can_call_model(resolved_model):
+    if not _circuit_enabled():
+        return True
+
+    circuit = _circuit_for(resolved_model)
+    if circuit["state"] != "open":
+        return True
+
+    opened_at = circuit.get("opened_at") or 0
+    if time.time() - opened_at >= _circuit_cooldown_seconds():
+        circuit["state"] = "half_open"
+        return True
+
+    return False
+
+
+def _record_model_success(resolved_model):
+    if not _circuit_enabled():
+        return
+
+    circuit = _circuit_for(resolved_model)
+    circuit["state"] = "closed"
+    circuit["failure_count"] = 0
+    circuit["opened_at"] = None
+
+
+def _record_model_failure(resolved_model):
+    if not _circuit_enabled():
+        return
+
+    circuit = _circuit_for(resolved_model)
+    if circuit["state"] == "half_open":
+        _open_circuit(resolved_model)
+        return
+
+    circuit["failure_count"] += 1
+    if circuit["failure_count"] >= _failure_threshold():
+        _open_circuit(resolved_model)
+
+
+def _candidate_model_aliases(model_alias):
+    candidates = [model_alias]
+    for fallback_alias in _fallback_aliases_for(model_alias):
+        if fallback_alias not in candidates:
+            candidates.append(fallback_alias)
+    return candidates
+
+
+async def _call_provider_with_reliability(*, model_alias, messages, stream, extra_kwargs):
+    primary_resolved_model = model_alias_to_litellm_model.get(model_alias, model_alias)
+    last_error = None
+    attempt_count = 0
+
+    for candidate_alias in _candidate_model_aliases(model_alias):
+        resolved_model = model_alias_to_litellm_model.get(candidate_alias, candidate_alias)
+        if not _can_call_model(resolved_model):
+            continue
+
+        for attempt_number in range(_max_attempts()):
+            attempt_count += 1
+            try:
+                response = await asyncio.wait_for(
+                    acompletion(
+                        model=resolved_model,
+                        messages=messages,
+                        stream=stream,
+                        **extra_kwargs,
+                    ),
+                    timeout=_provider_timeout_seconds(),
+                )
+                _record_model_success(resolved_model)
+                return response, {
+                    "selected_model_alias": candidate_alias,
+                    "selected_resolved_model": resolved_model,
+                    "fallback_from_model": (
+                        primary_resolved_model
+                        if resolved_model != primary_resolved_model
+                        else None
+                    ),
+                    "attempt_count": attempt_count,
+                    "circuit_state": _circuit_for(resolved_model)["state"]
+                    if _circuit_enabled()
+                    else "disabled",
+                }
+            except Exception as exc:
+                last_error = exc
+                _record_model_failure(resolved_model)
+                if attempt_number < _max_attempts() - 1:
+                    await asyncio.sleep(_retry_backoff_seconds())
+
+    if last_error:
+        raise last_error
+    raise RuntimeError("No available provider model candidates")
 
 
 def _usage_from_response(response):
@@ -176,6 +333,7 @@ def _log_chat_completion(
     error_type=None,
     usage=None,
     policy_decision=None,
+    reliability=None,
 ):
     payload = {
         "event": "chat_completion",
@@ -192,6 +350,8 @@ def _log_chat_completion(
         payload["policy_mode"] = policy_decision["mode"]
         payload["policy_allowed"] = policy_decision["allowed"]
         payload["policy_reason"] = policy_decision["reason"]
+    if reliability:
+        payload["reliability"] = reliability
     logger.info(json.dumps(payload, sort_keys=True))
 
 
@@ -321,7 +481,13 @@ async def chat_completions(request: Request):
     try:
         if stream:
             # Streaming response - LiteLLM returns proper SSE chunks
-            response = await acompletion(model=resolved_model, messages=messages, stream=True, **extra_kwargs)
+            response, reliability = await _call_provider_with_reliability(
+                model_alias=model,
+                messages=messages,
+                stream=True,
+                extra_kwargs=extra_kwargs,
+            )
+            resolved_model = reliability["selected_resolved_model"]
             await _send_observability_metric(
                 request_id=request_id,
                 resolved_model=resolved_model,
@@ -336,6 +502,7 @@ async def chat_completions(request: Request):
                 status_code=200,
                 started_at=started_at,
                 policy_decision=policy_decision,
+                reliability=reliability,
             )
             return StreamingResponse(
                 _stream_response(response),
@@ -343,7 +510,13 @@ async def chat_completions(request: Request):
             )
         else:
             # Non-streaming response
-            response = await acompletion(model=resolved_model, messages=messages, **extra_kwargs)
+            response, reliability = await _call_provider_with_reliability(
+                model_alias=model,
+                messages=messages,
+                stream=False,
+                extra_kwargs=extra_kwargs,
+            )
+            resolved_model = reliability["selected_resolved_model"]
             usage = _usage_from_response(response)
             await _send_observability_metric(
                 request_id=request_id,
@@ -361,6 +534,7 @@ async def chat_completions(request: Request):
                 started_at=started_at,
                 usage=usage,
                 policy_decision=policy_decision,
+                reliability=reliability,
             )
             return response
 
