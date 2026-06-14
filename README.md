@@ -286,6 +286,31 @@ curl.exe -X POST http://localhost:8000/v1/chat/completions `
 
 The POC uses Kong DB-less mode with declarative config in `kong/kong.yml`. It enables request correlation via `X-Request-ID` and a generous local rate limit for demonstration. Auth is intentionally not enabled in this phase because that would be a breaking change for current consumers.
 
+## Kong AI Gateway Experiment
+
+Phase 4.5 adds an isolated Kong AI Proxy experiment. It does not change the default Kong POC and does not affect existing `ai-market-studio` traffic.
+
+Run the experiment:
+
+```powershell
+$env:OPENAI_API_KEY = "sk-..."
+docker compose -f docker-compose.kong-ai.yml up
+```
+
+Kong listens on `localhost:8100` for the experiment route:
+
+```powershell
+curl.exe -X POST http://localhost:8100/kong-ai/v1/chat/completions `
+  -H "Content-Type: application/json" `
+  -d '{
+    "messages": [{"role": "user", "content": "Say hello in 3 words"}]
+  }'
+```
+
+The experiment uses Kong's `ai-proxy` plugin with `route_type: llm/v1/chat`, provider `openai`, and model `gpt-4o-mini`. The API key is injected through `DECK_OPENAI_API_KEY` from the local `OPENAI_API_KEY` environment variable.
+
+Use [docs/kong-ai-gateway-migration-evaluation.md](docs/kong-ai-gateway-migration-evaluation.md) for the migration boundary and decision matrix. Current recommendation: keep model aliases, provider fallback, circuit breaker, observability ingestion, consumer policy, and usage normalization in `ai-gateway-service`; evaluate Kong for edge routing, request IDs, generic rate limiting, auth, and simple one-route-to-one-model AI proxying.
+
 ## Tests
 
 ```powershell
@@ -335,6 +360,7 @@ ai-gateway-service/
     secret.yaml.template
   kong/
     kong.yml
+    kong-ai-proxy-experiment.yml
   openspec/
     changes/
       stabilize-ai-gateway-foundation/
@@ -343,8 +369,10 @@ ai-gateway-service/
       integrate-observability-service/
       add-consumer-model-policy/
       add-provider-reliability-layer/
+      evaluate-kong-ai-gateway-migration/
   config.yaml
   docker-compose.kong.yml
+  docker-compose.kong-ai.yml
   requirements.txt
   Dockerfile
   cloudbuild.yaml

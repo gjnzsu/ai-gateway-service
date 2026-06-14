@@ -1,0 +1,35 @@
+_format_version: "3.0"
+_transform: true
+
+services:
+  - name: kong-ai-openai-chat-experiment
+    url: https://api.openai.com
+    connect_timeout: 5000
+    read_timeout: 60000
+    write_timeout: 60000
+    retries: 1
+    routes:
+      - name: kong-ai-openai-chat
+        paths:
+          - /kong-ai/v1/chat/completions
+        strip_path: true
+        plugins:
+          - name: ai-proxy
+            config:
+              route_type: llm/v1/chat
+              auth:
+                header_name: Authorization
+                header_value: Bearer ${{ env "DECK_OPENAI_API_KEY" }}
+              model:
+                provider: openai
+                name: gpt-4o-mini
+                options:
+                  max_tokens: 512
+                  temperature: 1.0
+
+plugins:
+  - name: correlation-id
+    config:
+      header_name: X-Request-ID
+      generator: uuid
+      echo_downstream: true

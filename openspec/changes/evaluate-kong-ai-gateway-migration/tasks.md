@@ -1,0 +1,4 @@
+- [x] Add tests that enforce isolation between the default Kong POC and the AI Proxy experiment.
+- [x] Add an opt-in Kong AI Proxy experiment config and compose file.
+- [x] Document the Kong migration boundary and experiment usage.
+- [x] Validate tests and OpenSpec change.
