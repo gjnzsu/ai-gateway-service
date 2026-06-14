@@ -173,6 +173,36 @@ Structured logs include:
 
 This phase is intentionally non-breaking. Enforcement, quotas, budgets, auth, and Kong consumer mapping are later phases.
 
+## Security Screening
+
+Security screening is currently **log-only**. The gateway evaluates chat message content against configured prompt-injection phrases and sensitive-data regex patterns, then adds the result to structured logs. It does not block, redact, or mutate requests.
+
+Example configuration:
+
+```yaml
+security_checks:
+  mode: log_only
+  prompt_injection_patterns:
+    - ignore previous instructions
+    - reveal system prompt
+  sensitive_data_patterns:
+    - "(?i)api[_ -]?key\\s*[:=]\\s*[^\\s]+"
+```
+
+Structured logs include:
+
+- `security_mode`
+- `security_allowed`
+- `security_reason`
+- `security_flags`
+
+Possible flags:
+
+- `prompt_injection`
+- `sensitive_data`
+
+The gateway does not add raw prompt or response content to structured logs for this feature. Pattern matching is intentionally conservative and can produce false positives or false negatives. Enforcement, redaction, audit retention, external classifiers, and Kong-based auth are later phases.
+
 ## Provider Reliability
 
 Provider reliability is configured in `config.yaml` under `reliability`.

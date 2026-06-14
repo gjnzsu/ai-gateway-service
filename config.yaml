@@ -32,6 +32,16 @@ consumer_policies:
       - gpt-4o-mini
       - deepseek-chat
 
+security_checks:
+  mode: log_only
+  prompt_injection_patterns:
+    - ignore previous instructions
+    - reveal system prompt
+    - disregard previous instructions
+  sensitive_data_patterns:
+    - "(?i)api[_ -]?key\\s*[:=]\\s*[^\\s]+"
+    - "(?i)authorization\\s*:\\s*bearer\\s+[^\\s]+"
+
 reliability:
   timeout_seconds: 30
   retry:

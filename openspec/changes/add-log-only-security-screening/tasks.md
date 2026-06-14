@@ -1,0 +1,5 @@
+- [x] Add tests for clean request security metadata.
+- [x] Add tests for prompt-injection and sensitive-data signal logging without blocking.
+- [x] Add security screening configuration and implementation.
+- [x] Document Phase 5 security screening behavior and limits.
+- [x] Validate tests and OpenSpec change.

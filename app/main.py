@@ -8,6 +8,7 @@ import asyncio
 import json
 import os
 import logging
+import re
 import time
 import uuid
 from pathlib import Path
@@ -71,6 +72,63 @@ def _evaluate_consumer_policy(consumer: str, model):
         "mode": "log_only",
         "allowed": allowed,
         "reason": "model_allowed" if allowed else "model_not_allowed",
+    }
+
+
+def _security_checks_config():
+    return config.get("security_checks", {})
+
+
+def _message_text_from(content):
+    if isinstance(content, str):
+        return content
+
+    if isinstance(content, list):
+        text_parts = []
+        for part in content:
+            if isinstance(part, dict) and isinstance(part.get("text"), str):
+                text_parts.append(part["text"])
+            elif isinstance(part, str):
+                text_parts.append(part)
+        return "\n".join(text_parts)
+
+    return ""
+
+
+def _chat_message_text(messages):
+    text_parts = []
+    for message in messages or []:
+        if isinstance(message, dict):
+            text = _message_text_from(message.get("content"))
+            if text:
+                text_parts.append(text)
+    return "\n".join(text_parts)
+
+
+def _evaluate_security_checks(messages):
+    security_config = _security_checks_config()
+    message_text = _chat_message_text(messages)
+    lowered_text = message_text.lower()
+    flags = []
+
+    for pattern in security_config.get("prompt_injection_patterns", []):
+        if isinstance(pattern, str) and pattern.lower() in lowered_text:
+            flags.append("prompt_injection")
+            break
+
+    for pattern in security_config.get("sensitive_data_patterns", []):
+        try:
+            if isinstance(pattern, str) and re.search(pattern, message_text):
+                flags.append("sensitive_data")
+                break
+        except re.error:
+            logger.warning("Invalid security sensitive_data pattern ignored: %s", pattern)
+
+    return {
+        "mode": security_config.get("mode", "log_only"),
+        "allowed": True,
+        "reason": "security_signal_detected" if flags else "no_security_signal",
+        "flags": flags,
     }
 
 
@@ -333,6 +391,7 @@ def _log_chat_completion(
     error_type=None,
     usage=None,
     policy_decision=None,
+    security_decision=None,
     reliability=None,
 ):
     payload = {
@@ -350,6 +409,11 @@ def _log_chat_completion(
         payload["policy_mode"] = policy_decision["mode"]
         payload["policy_allowed"] = policy_decision["allowed"]
         payload["policy_reason"] = policy_decision["reason"]
+    if security_decision:
+        payload["security_mode"] = security_decision["mode"]
+        payload["security_allowed"] = security_decision["allowed"]
+        payload["security_reason"] = security_decision["reason"]
+        payload["security_flags"] = security_decision["flags"]
     if reliability:
         payload["reliability"] = reliability
     logger.info(json.dumps(payload, sort_keys=True))
@@ -443,6 +507,7 @@ async def chat_completions(request: Request):
     model = body.get("model")
     messages = body.get("messages", [])
     stream = body.get("stream", False)
+    security_decision = _evaluate_security_checks(messages)
 
     if not model:
         policy_decision = _evaluate_consumer_policy(consumer, None)
@@ -455,6 +520,7 @@ async def chat_completions(request: Request):
             started_at=started_at,
             error_type="validation_error",
             policy_decision=policy_decision,
+            security_decision=security_decision,
         )
         raise HTTPException(status_code=400, detail="model is required")
 
@@ -472,6 +538,7 @@ async def chat_completions(request: Request):
             started_at=started_at,
             error_type="validation_error",
             policy_decision=policy_decision,
+            security_decision=security_decision,
         )
         raise HTTPException(status_code=400, detail="messages is required")
 
@@ -502,6 +569,7 @@ async def chat_completions(request: Request):
                 status_code=200,
                 started_at=started_at,
                 policy_decision=policy_decision,
+                security_decision=security_decision,
                 reliability=reliability,
             )
             return StreamingResponse(
@@ -534,6 +602,7 @@ async def chat_completions(request: Request):
                 started_at=started_at,
                 usage=usage,
                 policy_decision=policy_decision,
+                security_decision=security_decision,
                 reliability=reliability,
             )
             return response
@@ -555,6 +624,7 @@ async def chat_completions(request: Request):
             started_at=started_at,
             error_type="bad_request",
             policy_decision=policy_decision,
+            security_decision=security_decision,
         )
         raise HTTPException(status_code=400, detail=str(e))
     except litellm.exceptions.AuthenticationError as e:
@@ -574,6 +644,7 @@ async def chat_completions(request: Request):
             started_at=started_at,
             error_type="authentication_error",
             policy_decision=policy_decision,
+            security_decision=security_decision,
         )
         raise HTTPException(status_code=401, detail=str(e))
     except litellm.exceptions.RateLimitError as e:
@@ -593,6 +664,7 @@ async def chat_completions(request: Request):
             started_at=started_at,
             error_type="rate_limit",
             policy_decision=policy_decision,
+            security_decision=security_decision,
         )
         raise HTTPException(status_code=429, detail=str(e))
     except litellm.exceptions.APIError as e:
@@ -612,6 +684,7 @@ async def chat_completions(request: Request):
             started_at=started_at,
             error_type="api_error",
             policy_decision=policy_decision,
+            security_decision=security_decision,
         )
         raise HTTPException(status_code=500, detail=str(e))
     except Exception as e:
@@ -631,6 +704,7 @@ async def chat_completions(request: Request):
             started_at=started_at,
             error_type="internal_error",
             policy_decision=policy_decision,
+            security_decision=security_decision,
         )
         raise HTTPException(status_code=500, detail=f"Internal error: {str(e)}")
 
