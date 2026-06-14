@@ -1,0 +1,32 @@
+_format_version: "3.0"
+_transform: true
+
+services:
+  - name: ai-gateway-service-prompt-guard-evaluation
+    url: http://ai-gateway-service:4000
+    connect_timeout: 5000
+    read_timeout: 60000
+    write_timeout: 60000
+    retries: 2
+    routes:
+      - name: kong-prompt-guard-v1
+        paths:
+          - /kong-guard/v1
+        strip_path: true
+        plugins:
+          - name: ai-prompt-guard
+            config:
+              allow_patterns:
+                - "(?s).*"
+              deny_patterns: []
+
+plugins:
+  - name: correlation-id
+    config:
+      header_name: X-Request-ID
+      generator: uuid
+      echo_downstream: true
+  - name: rate-limiting
+    config:
+      minute: 120
+      policy: local

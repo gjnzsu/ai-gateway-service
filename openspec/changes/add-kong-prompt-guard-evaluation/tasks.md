@@ -1,0 +1,4 @@
+- [x] Add tests for isolated Kong Prompt Guard evaluation config.
+- [x] Add opt-in Kong Prompt Guard evaluation compose and declarative config.
+- [x] Document experiment usage, limits, and migration decision.
+- [x] Validate tests and OpenSpec change.

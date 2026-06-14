@@ -341,6 +341,24 @@ The experiment uses Kong's `ai-proxy` plugin with `route_type: llm/v1/chat`, pro
 
 Use [docs/kong-ai-gateway-migration-evaluation.md](docs/kong-ai-gateway-migration-evaluation.md) for the migration boundary and decision matrix. Current recommendation: keep model aliases, provider fallback, circuit breaker, observability ingestion, consumer policy, and usage normalization in `ai-gateway-service`; evaluate Kong for edge routing, request IDs, generic rate limiting, auth, and simple one-route-to-one-model AI proxying.
 
+## Kong Prompt Guard Evaluation
+
+Phase 6 adds an isolated Kong AI Prompt Guard evaluation route. The default `/v1` Kong POC remains unchanged.
+
+Run the experiment:
+
+```powershell
+docker compose -f docker-compose.kong-guard.yml up --build
+```
+
+Kong listens on `localhost:8200` for the experiment route:
+
+```powershell
+curl.exe http://localhost:8200/kong-guard/v1/models
+```
+
+The experiment attaches `ai-prompt-guard` to `/kong-guard/v1` with a pass-through allow pattern and no deny patterns. This validates plugin availability and request compatibility without blocking traffic. Use [docs/kong-prompt-guard-evaluation.md](docs/kong-prompt-guard-evaluation.md) for details and migration limits.
+
 ## Tests
 
 ```powershell
@@ -391,6 +409,7 @@ ai-gateway-service/
   kong/
     kong.yml
     kong-ai-proxy-experiment.yml
+    kong-prompt-guard-evaluation.yml
   openspec/
     changes/
       stabilize-ai-gateway-foundation/
@@ -400,9 +419,12 @@ ai-gateway-service/
       add-consumer-model-policy/
       add-provider-reliability-layer/
       evaluate-kong-ai-gateway-migration/
+      add-log-only-security-screening/
+      add-kong-prompt-guard-evaluation/
   config.yaml
   docker-compose.kong.yml
   docker-compose.kong-ai.yml
+  docker-compose.kong-guard.yml
   requirements.txt
   Dockerfile
   cloudbuild.yaml
