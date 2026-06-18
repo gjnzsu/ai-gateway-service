@@ -5,6 +5,7 @@ A minimal FastAPI server that routes LLM requests through LiteLLM.
 Provides OpenAI-compatible endpoints: /v1/chat/completions, /v1/models, /health
 """
 import asyncio
+import copy
 import json
 import os
 import logging
@@ -129,7 +130,133 @@ def _evaluate_security_checks(messages):
         "allowed": True,
         "reason": "security_signal_detected" if flags else "no_security_signal",
         "flags": flags,
+        "action": "none",
     }
+
+
+def _security_mode() -> str:
+    mode = str(_security_checks_config().get("mode", "log_only")).lower().strip()
+    if mode == "audit":
+        return "log_only"
+    if mode in {"log_only", "mask", "enforce"}:
+        return mode
+    return "log_only"
+
+
+def _masking_enabled() -> bool:
+    return _security_mode() in {"mask", "enforce"}
+
+
+def _enforce_enabled() -> bool:
+    return _security_mode() == "enforce"
+
+
+def _redact_sensitive_text(text: str) -> tuple[str, bool]:
+    redacted = text
+    changed = False
+    for pattern in _security_checks_config().get("sensitive_data_patterns", []):
+        if not isinstance(pattern, str):
+            continue
+        try:
+            next_redacted = re.sub(pattern, "[REDACTED:sensitive_data]", redacted)
+        except re.error:
+            logger.warning("Invalid security sensitive_data pattern ignored: %s", pattern)
+            continue
+        if next_redacted != redacted:
+            changed = True
+            redacted = next_redacted
+    return redacted, changed
+
+
+def _redact_content(content):
+    if isinstance(content, str):
+        return _redact_sensitive_text(content)
+    if isinstance(content, list):
+        changed = False
+        redacted_parts = []
+        for part in content:
+            if isinstance(part, dict):
+                redacted_part = dict(part)
+                if isinstance(redacted_part.get("text"), str):
+                    redacted_text, part_changed = _redact_sensitive_text(
+                        redacted_part["text"]
+                    )
+                    redacted_part["text"] = redacted_text
+                    changed = changed or part_changed
+                redacted_parts.append(redacted_part)
+            elif isinstance(part, str):
+                redacted_text, part_changed = _redact_sensitive_text(part)
+                redacted_parts.append(redacted_text)
+                changed = changed or part_changed
+            else:
+                redacted_parts.append(part)
+        return redacted_parts, changed
+    return content, False
+
+
+def _redact_messages(messages):
+    redacted_messages = []
+    changed = False
+    for message in messages or []:
+        if not isinstance(message, dict):
+            redacted_messages.append(message)
+            continue
+        redacted_message = dict(message)
+        redacted_content, content_changed = _redact_content(
+            redacted_message.get("content")
+        )
+        redacted_message["content"] = redacted_content
+        changed = changed or content_changed
+        redacted_messages.append(redacted_message)
+    return redacted_messages, changed
+
+
+def _response_message_contents(response) -> list[str]:
+    if not isinstance(response, dict):
+        return []
+    contents = []
+    for choice in response.get("choices", []) or []:
+        if not isinstance(choice, dict):
+            continue
+        message = choice.get("message")
+        if isinstance(message, dict):
+            text = _message_text_from(message.get("content"))
+            if text:
+                contents.append(text)
+    return contents
+
+
+def _response_has_blocked_content(response) -> bool:
+    combined = "\n".join(_response_message_contents(response)).lower()
+    if not combined:
+        return False
+    for pattern in _security_checks_config().get("response_block_patterns", []):
+        if isinstance(pattern, str) and pattern.lower() in combined:
+            return True
+    return False
+
+
+def _redact_response(response):
+    if not isinstance(response, dict):
+        return response, False
+    redacted_response = copy.deepcopy(response)
+    changed = False
+    for choice in redacted_response.get("choices", []) or []:
+        if not isinstance(choice, dict):
+            continue
+        message = choice.get("message")
+        if isinstance(message, dict):
+            redacted_content, content_changed = _redact_content(message.get("content"))
+            message["content"] = redacted_content
+            changed = changed or content_changed
+    return redacted_response, changed
+
+
+def _safety_error_response(status_code: int, code: str, message: str) -> JSONResponse:
+    return JSONResponse(
+        status_code=status_code,
+        content={"error": {"code": code, "message": message}},
+    )
 
 
 def _reliability_config():
@@ -414,6 +541,7 @@ def _log_chat_completion(
         payload["security_allowed"] = security_decision["allowed"]
         payload["security_reason"] = security_decision["reason"]
         payload["security_flags"] = security_decision["flags"]
+        payload["security_action"] = security_decision.get("action", "none")
     if reliability:
         payload["reliability"] = reliability
     logger.info(json.dumps(payload, sort_keys=True))
@@ -542,6 +670,35 @@ async def chat_completions(request: Request):
         )
         raise HTTPException(status_code=400, detail="messages is required")
 
+    if _enforce_enabled() and "prompt_injection" in security_decision["flags"]:
+        security_decision = {
+            **security_decision,
+            "allowed": False,
+            "action": "blocked",
+        }
+        _log_chat_completion(
+            request_id=request_id,
+            consumer=consumer,
+            model=model,
+            resolved_model=resolved_model,
+            status_code=400,
+            started_at=started_at,
+            error_type="prompt_safety_violation",
+            policy_decision=policy_decision,
+            security_decision=security_decision,
+        )
+        return _safety_error_response(
+            400,
+            "prompt_safety_violation",
+            "Prompt rejected by AI gateway safety policy.",
+        )
+
+    provider_messages = messages
+    if _masking_enabled():
+        provider_messages, messages_redacted = _redact_messages(messages)
+        if messages_redacted:
+            security_decision = {**security_decision, "action": "masked"}
+
     # Pass through extra kwargs (temperature, top_p, etc.)
     extra_kwargs = {k: v for k, v in body.items() if k not in ("model", "messages", "stream")}
 
@@ -550,7 +707,7 @@ async def chat_completions(request: Request):
             # Streaming response - LiteLLM returns proper SSE chunks
             response, reliability = await _call_provider_with_reliability(
                 model_alias=model,
-                messages=messages,
+                messages=provider_messages,
                 stream=True,
                 extra_kwargs=extra_kwargs,
             )
@@ -580,11 +737,46 @@ async def chat_completions(request: Request):
             # Non-streaming response
             response, reliability = await _call_provider_with_reliability(
                 model_alias=model,
-                messages=messages,
+                messages=provider_messages,
                 stream=False,
                 extra_kwargs=extra_kwargs,
             )
             resolved_model = reliability["selected_resolved_model"]
+            if _enforce_enabled() and _response_has_blocked_content(response):
+                security_decision = {
+                    **security_decision,
+                    "allowed": False,
+                    "reason": "response_safety_violation",
+                    "action": "blocked",
+                }
+                await _send_observability_metric(
+                    request_id=request_id,
+                    resolved_model=resolved_model,
+                    started_at=started_at,
+                    status="error",
+                    error_type="response_safety_violation",
+                )
+                _log_chat_completion(
+                    request_id=request_id,
+                    consumer=consumer,
+                    model=model,
+                    resolved_model=resolved_model,
+                    status_code=502,
+                    started_at=started_at,
+                    error_type="response_safety_violation",
+                    policy_decision=policy_decision,
+                    security_decision=security_decision,
+                    reliability=reliability,
+                )
+                return _safety_error_response(
+                    502,
+                    "response_safety_violation",
+                    "Model response blocked by AI gateway safety policy.",
+                )
+            if _masking_enabled():
+                response, response_redacted = _redact_response(response)
+                if response_redacted:
+                    security_decision = {**security_decision, "action": "masked"}
             usage = _usage_from_response(response)
             await _send_observability_metric(
                 request_id=request_id,

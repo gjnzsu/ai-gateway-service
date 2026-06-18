@@ -41,6 +41,8 @@ security_checks:
   sensitive_data_patterns:
     - "(?i)api[_ -]?key\\s*[:=]\\s*[^\\s]+"
     - "(?i)authorization\\s*:\\s*bearer\\s+[^\\s]+"
+  response_block_patterns:
+    - unsafe model output
 
 reliability:
   timeout_seconds: 30
