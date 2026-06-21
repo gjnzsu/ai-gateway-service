@@ -173,9 +173,18 @@ Structured logs include:
 
 This phase is intentionally non-breaking. Enforcement, quotas, budgets, auth, and Kong consumer mapping are later phases.
 
-## Security Screening
+## AI Guardrails
 
-Security screening is currently **log-only**. The gateway evaluates chat message content against configured prompt-injection phrases and sensitive-data regex patterns, then adds the result to structured logs. It does not block, redact, or mutate requests.
+AI guardrails are configured under `security_checks`. The default mode remains **log-only** so existing consumers are not broken, but the same layer can also mask PII-like values and enforce prompt/response safety policy.
+
+Supported modes:
+
+| Mode | Behavior |
+| --- | --- |
+| `log_only` | Detect configured signals and log metadata only. |
+| `audit` | Alias for `log_only`; useful for rollout language. |
+| `mask` | Redact configured sensitive-data patterns before provider calls and in non-streaming provider responses. |
+| `enforce` | Redact sensitive-data patterns and block prompt-injection input or configured unsafe response phrases. |
 
 Example configuration:
 
@@ -187,7 +196,16 @@ security_checks:
     - reveal system prompt
   sensitive_data_patterns:
     - "(?i)api[_ -]?key\\s*[:=]\\s*[^\\s]+"
+  response_block_patterns:
+    - unsafe model output
 ```
+
+Machine-readable safety errors:
+
+| Condition | HTTP status | Error code |
+| --- | ---: | --- |
+| Prompt input blocked in `enforce` mode | 400 | `prompt_safety_violation` |
+| Provider response blocked in `enforce` mode | 502 | `response_safety_violation` |
 
 Structured logs include:
 
@@ -195,6 +213,7 @@ Structured logs include:
 - `security_allowed`
 - `security_reason`
 - `security_flags`
+- `security_action`
 
 Possible flags:
 
@@ -202,6 +221,8 @@ Possible flags:
 - `sensitive_data`
 
 The gateway does not add raw prompt or response content to structured logs for this feature. Pattern matching is intentionally conservative and can produce false positives or false negatives. Enforcement, redaction, audit retention, external classifiers, and Kong-based auth are later phases.
+
+Response mutation currently applies to non-streaming responses. Streaming responses keep their existing response path in this phase.
 
 ## Provider Reliability
 
