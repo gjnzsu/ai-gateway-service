@@ -1,4 +1,9 @@
 model_list:
+  - model_name: gpt-5.4
+    litellm_params:
+      model: openai/gpt-5.4
+      api_key: os.environ/OPENAI_API_KEY
+
   - model_name: gpt-4o
     litellm_params:
       model: openai/gpt-4o
@@ -28,6 +33,7 @@ consumer_policies:
   ai-market-studio:
     mode: log_only
     allowed_models:
+      - gpt-5.4
       - gpt-4o
       - gpt-4o-mini
       - deepseek-chat
@@ -52,6 +58,9 @@ reliability:
     failure_threshold: 2
     cooldown_seconds: 30
   fallbacks:
+    gpt-5.4:
+      - gpt-4o
+      - gpt-4o-mini
     gpt-4o:
       - gpt-4o-mini
 

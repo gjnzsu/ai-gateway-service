@@ -89,6 +89,44 @@ async def test_primary_failure_falls_back_to_configured_model(make_client, monke
 
 
 @pytest.mark.asyncio
+async def test_gpt_54_failure_falls_back_through_gpt_4o_to_mini(
+    make_client, monkeypatch
+):
+    calls = []
+
+    async def fake_acompletion(**kwargs):
+        calls.append(kwargs["model"])
+        if kwargs["model"] in {"openai/gpt-5.4", "openai/gpt-4o"}:
+            raise RuntimeError("configured fallback unavailable")
+        return {"id": "gpt-54-fallback-response", "object": "chat.completion"}
+
+    async def fake_sleep(seconds):
+        return None
+
+    monkeypatch.setattr("app.main.acompletion", fake_acompletion)
+    monkeypatch.setattr("app.main.asyncio.sleep", fake_sleep)
+
+    async with make_client() as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "gpt-5.4",
+                "messages": [{"role": "user", "content": "hello"}],
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["id"] == "gpt-54-fallback-response"
+    assert calls == [
+        "openai/gpt-5.4",
+        "openai/gpt-5.4",
+        "openai/gpt-4o",
+        "openai/gpt-4o",
+        "openai/gpt-4o-mini",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_open_circuit_skips_primary_and_uses_fallback(make_client, monkeypatch):
     import app.main
 
