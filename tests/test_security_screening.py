@@ -2,6 +2,7 @@ import json
 import logging
 
 import pytest
+from litellm.utils import ModelResponse
 
 
 def _chat_log_payloads(caplog):
@@ -227,6 +228,43 @@ async def test_mask_mode_redacts_sensitive_data_in_provider_response(
 
 
 @pytest.mark.asyncio
+async def test_mask_mode_redacts_sensitive_data_in_litellm_model_response(
+    make_client, monkeypatch
+):
+    monkeypatch.setitem(__import__("app.main").main.config["security_checks"], "mode", "mask")
+
+    async def fake_acompletion(**kwargs):
+        return ModelResponse(
+            id="chatcmpl-test",
+            choices=[
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "The upstream token is api_key=sk-model-response-secret",
+                    }
+                }
+            ],
+        )
+
+    monkeypatch.setattr("app.main.acompletion", fake_acompletion)
+
+    async with make_client() as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "gpt-4o-mini",
+                "messages": [{"role": "user", "content": "Hello"}],
+            },
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    content = body["choices"][0]["message"]["content"]
+    assert "sk-model-response-secret" not in content
+    assert "[REDACTED:sensitive_data]" in content
+
+
+@pytest.mark.asyncio
 async def test_enforce_mode_blocks_unsafe_provider_response(
     make_client, monkeypatch, caplog
 ):
@@ -247,6 +285,47 @@ async def test_enforce_mode_blocks_unsafe_provider_response(
                 }
             ],
         }
+
+    monkeypatch.setattr("app.main.acompletion", fake_acompletion)
+    caplog.set_level(logging.INFO, logger="app.main")
+
+    async with make_client() as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "gpt-4o-mini",
+                "messages": [{"role": "user", "content": "Hello"}],
+            },
+        )
+
+    assert response.status_code == 502
+    assert response.json()["error"]["code"] == "response_safety_violation"
+    assert "SECRET_UNSAFE_CONTENT" not in response.text
+    payload = _chat_log_payloads(caplog)[-1]
+    assert payload["security_action"] == "blocked"
+    assert "SECRET_UNSAFE_CONTENT" not in json.dumps(payload)
+
+
+@pytest.mark.asyncio
+async def test_enforce_mode_blocks_unsafe_litellm_model_response(
+    make_client, monkeypatch, caplog
+):
+    security_config = __import__("app.main").main.config["security_checks"]
+    monkeypatch.setitem(security_config, "mode", "enforce")
+    monkeypatch.setitem(security_config, "response_block_patterns", ["unsafe model output"])
+
+    async def fake_acompletion(**kwargs):
+        return ModelResponse(
+            id="chatcmpl-test",
+            choices=[
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "unsafe model output: SECRET_UNSAFE_CONTENT",
+                    }
+                }
+            ],
+        )
 
     monkeypatch.setattr("app.main.acompletion", fake_acompletion)
     caplog.set_level(logging.INFO, logger="app.main")

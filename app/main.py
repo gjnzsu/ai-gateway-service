@@ -211,11 +211,22 @@ def _redact_messages(messages):
     return redacted_messages, changed
 
 
+def _response_as_dict(response):
+    if isinstance(response, dict):
+        return response
+    if hasattr(response, "model_dump"):
+        return response.model_dump()
+    if hasattr(response, "dict"):
+        return response.dict()
+    return None
+
+
 def _response_message_contents(response) -> list[str]:
-    if not isinstance(response, dict):
+    response_dict = _response_as_dict(response)
+    if not response_dict:
         return []
     contents = []
-    for choice in response.get("choices", []) or []:
+    for choice in response_dict.get("choices", []) or []:
         if not isinstance(choice, dict):
             continue
         message = choice.get("message")
@@ -237,9 +248,10 @@ def _response_has_blocked_content(response) -> bool:
 
 
 def _redact_response(response):
-    if not isinstance(response, dict):
+    response_dict = _response_as_dict(response)
+    if not response_dict:
         return response, False
-    redacted_response = copy.deepcopy(response)
+    redacted_response = copy.deepcopy(response_dict)
     changed = False
     for choice in redacted_response.get("choices", []) or []:
         if not isinstance(choice, dict):
