@@ -18,6 +18,7 @@ from contextlib import asynccontextmanager
 import yaml
 import httpx
 from fastapi import FastAPI, Request, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 import uvicorn
 import litellm
@@ -51,6 +52,18 @@ def _request_id_from(request: Request) -> str:
 
 def _consumer_from(request: Request) -> str:
     return request.headers.get("x-consumer-service") or "unknown"
+
+
+def _attribution_from(request: Request) -> dict:
+    consumer = _consumer_from(request)
+    return {
+        "consumer": consumer,
+        "application": request.headers.get("x-ai-application-id") or consumer,
+        "project": request.headers.get("x-ai-project-id") or "unknown",
+        "team": request.headers.get("x-ai-team-id") or "unknown",
+        "use_case": request.headers.get("x-ai-use-case") or "unknown",
+        "feature": request.headers.get("x-ai-feature") or "unknown",
+    }
 
 
 def _consumer_policies():
@@ -473,11 +486,13 @@ def _build_llm_call_metric(
     resolved_model,
     started_at: float,
     status: str,
+    attribution=None,
     error_type=None,
     usage=None,
 ):
     provider, model = _provider_and_model_from(resolved_model)
     usage = usage or {}
+    attribution = attribution or {}
     return {
         "service_name": _observability_service_name(),
         "metric_type": "llm_call",
@@ -486,6 +501,12 @@ def _build_llm_call_metric(
         "data": {
             "provider": provider,
             "model": model,
+            "consumer": attribution.get("consumer") or "unknown",
+            "application": attribution.get("application") or "unknown",
+            "project": attribution.get("project") or "unknown",
+            "team": attribution.get("team") or "unknown",
+            "use_case": attribution.get("use_case") or "unknown",
+            "feature": attribution.get("feature") or "unknown",
             "prompt_tokens": usage.get("prompt_tokens") or 0,
             "completion_tokens": usage.get("completion_tokens") or 0,
             "duration_seconds": max(time.perf_counter() - started_at, 0),
@@ -591,7 +612,6 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="AI Gateway", lifespan=lifespan)
 
 # CORS middleware
-from fastapi.middleware.cors import CORSMiddleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -643,6 +663,7 @@ async def chat_completions(request: Request):
     started_at = time.perf_counter()
     request_id = _request_id_from(request)
     consumer = _consumer_from(request)
+    attribution = _attribution_from(request)
     body = await request.json()
     model = body.get("model")
     messages = body.get("messages", [])
@@ -729,6 +750,7 @@ async def chat_completions(request: Request):
                 resolved_model=resolved_model,
                 started_at=started_at,
                 status="success",
+                attribution=attribution,
             )
             _log_chat_completion(
                 request_id=request_id,
@@ -767,6 +789,7 @@ async def chat_completions(request: Request):
                     started_at=started_at,
                     status="error",
                     error_type="response_safety_violation",
+                    attribution=attribution,
                 )
                 _log_chat_completion(
                     request_id=request_id,
@@ -796,6 +819,7 @@ async def chat_completions(request: Request):
                 started_at=started_at,
                 status="success",
                 usage=usage,
+                attribution=attribution,
             )
             _log_chat_completion(
                 request_id=request_id,
@@ -818,6 +842,7 @@ async def chat_completions(request: Request):
             started_at=started_at,
             status="error",
             error_type="bad_request",
+            attribution=attribution,
         )
         _log_chat_completion(
             request_id=request_id,
@@ -838,6 +863,7 @@ async def chat_completions(request: Request):
             started_at=started_at,
             status="error",
             error_type="authentication_error",
+            attribution=attribution,
         )
         _log_chat_completion(
             request_id=request_id,
@@ -858,6 +884,7 @@ async def chat_completions(request: Request):
             started_at=started_at,
             status="error",
             error_type="rate_limit",
+            attribution=attribution,
         )
         _log_chat_completion(
             request_id=request_id,
@@ -878,6 +905,7 @@ async def chat_completions(request: Request):
             started_at=started_at,
             status="error",
             error_type="api_error",
+            attribution=attribution,
         )
         _log_chat_completion(
             request_id=request_id,
@@ -898,6 +926,7 @@ async def chat_completions(request: Request):
             started_at=started_at,
             status="error",
             error_type="internal_error",
+            attribution=attribution,
         )
         _log_chat_completion(
             request_id=request_id,

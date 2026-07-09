@@ -55,7 +55,15 @@ async def test_non_streaming_success_sends_llm_call_metric(make_client, monkeypa
     async with make_client() as client:
         response = await client.post(
             "/v1/chat/completions",
-            headers={"X-Request-ID": "req-success-001"},
+            headers={
+                "X-Request-ID": "req-success-001",
+                "X-Consumer-Service": "ai-market-studio",
+                "X-AI-Application-ID": "ai-market-studio",
+                "X-AI-Project-ID": "fx-market-insight",
+                "X-AI-Team-ID": "markets",
+                "X-AI-Use-Case": "fx-data-query",
+                "X-AI-Feature": "query-result-generation",
+            },
             json={
                 "model": "gpt-4o-mini",
                 "messages": [{"role": "user", "content": "hello"}],
@@ -70,11 +78,52 @@ async def test_non_streaming_success_sends_llm_call_metric(make_client, monkeypa
     assert payload["trace_id"] == "req-success-001"
     assert payload["data"]["provider"] == "openai"
     assert payload["data"]["model"] == "gpt-4o-mini"
+    assert payload["data"]["consumer"] == "ai-market-studio"
+    assert payload["data"]["application"] == "ai-market-studio"
+    assert payload["data"]["project"] == "fx-market-insight"
+    assert payload["data"]["team"] == "markets"
+    assert payload["data"]["use_case"] == "fx-data-query"
+    assert payload["data"]["feature"] == "query-result-generation"
     assert payload["data"]["prompt_tokens"] == 12
     assert payload["data"]["completion_tokens"] == 5
     assert payload["data"]["duration_seconds"] >= 0
     assert payload["data"]["status"] == "success"
     assert payload["data"]["error_type"] is None
+
+
+@pytest.mark.asyncio
+async def test_non_streaming_success_sends_unknown_attribution_defaults(
+    make_client, monkeypatch
+):
+    calls = []
+
+    async def fake_acompletion(**kwargs):
+        return {"id": "chatcmpl-test", "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
+
+    async def fake_post_observability_metric(payload):
+        calls.append(payload)
+
+    monkeypatch.setenv("OBSERVABILITY_URL", "http://observability.test")
+    monkeypatch.setattr("app.main.acompletion", fake_acompletion)
+    monkeypatch.setattr("app.main._post_observability_metric", fake_post_observability_metric)
+
+    async with make_client() as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "gpt-4o-mini",
+                "messages": [{"role": "user", "content": "hello"}],
+            },
+        )
+
+    assert response.status_code == 200
+    payload = calls[0]
+    assert payload["data"]["consumer"] == "unknown"
+    assert payload["data"]["application"] == "unknown"
+    assert payload["data"]["project"] == "unknown"
+    assert payload["data"]["team"] == "unknown"
+    assert payload["data"]["use_case"] == "unknown"
+    assert payload["data"]["feature"] == "unknown"
 
 
 @pytest.mark.asyncio
