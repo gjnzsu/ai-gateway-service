@@ -29,7 +29,7 @@
 - Consumes: `docs/superpowers/specs/2026-07-26-runtime-component-architecture-diagram-design.md`
 - Produces: an editable draw.io source, an embedded-diagram PNG preview, and a README reference.
 
-- [ ] **Step 1: Create the draw.io source**
+- [x] **Step 1: Create the draw.io source**
 
 Create a single-page `mxGraphModel` with:
 
@@ -41,7 +41,7 @@ Create a single-page `mxGraphModel` with:
 - orthogonal arrows for every approved relationship;
 - no edge labels, function names, parameters, or infrastructure components.
 
-- [ ] **Step 2: Validate the XML**
+- [x] **Step 2: Validate the XML**
 
 Run:
 
@@ -51,7 +51,7 @@ Run:
 
 Expected: exit code `0` with no output.
 
-- [ ] **Step 3: Export the PNG**
+- [x] **Step 3: Export the PNG**
 
 Locate draw.io Desktop and run:
 
@@ -64,7 +64,7 @@ Locate draw.io Desktop and run:
 
 Expected: exit code `0` and a non-empty PNG with embedded diagram XML.
 
-- [ ] **Step 4: Inspect the rendered diagram**
+- [x] **Step 4: Inspect the rendered diagram**
 
 Open the PNG and confirm:
 
@@ -74,7 +74,7 @@ Open the PNG and confirm:
 - no text is clipped;
 - no connector crosses an unrelated component.
 
-- [ ] **Step 5: Add the README reference**
+- [x] **Step 5: Add the README reference**
 
 Replace the existing text-only diagrams in the `Architecture` section with:
 
@@ -87,7 +87,7 @@ The editable source is available at
 [docs/architecture/runtime-component-architecture.drawio](docs/architecture/runtime-component-architecture.drawio).
 ```
 
-- [ ] **Step 6: Verify scope and repository state**
+- [x] **Step 6: Verify scope and repository state**
 
 Run:
 
@@ -98,7 +98,7 @@ git status --short
 
 Expected: only the draw.io source, PNG preview, README, and this plan are changed or newly tracked.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 Run:
 
