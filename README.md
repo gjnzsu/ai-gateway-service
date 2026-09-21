@@ -303,6 +303,14 @@ kubectl -n ai-gateway rollout restart deployment/ai-gateway
 kubectl -n ai-gateway rollout status deployment/ai-gateway
 ```
 
+## Shared Kong GKE ownership
+
+This repository owns `k8s/kong-config.yaml`, `k8s/kong-deployment.yaml`,
+`k8s/kong-service.yaml` and their resource tests, migrated unchanged from Market Studio.
+See [release, rollback and ownership](docs/kong-gke-operations.md). Kong releases
+are independent of the Python Gateway image build. Applications only consume the
+shared endpoint; cross-service startup is owned by ai-platform.
+
 ## Kong Gateway POC
 
 The Kong POC is optional and local-only. It does not change the direct gateway path on `localhost:4000`, and it does not require existing consumers to send new headers or auth credentials.
