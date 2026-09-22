@@ -2,7 +2,7 @@
 AI Gateway Service - LiteLLM Proxy Server
 
 A minimal FastAPI server that routes LLM requests through LiteLLM.
-Provides OpenAI-compatible endpoints: /v1/chat/completions, /v1/models, /health
+Provides OpenAI-compatible chat, embedding and model-list endpoints.
 """
 import asyncio
 import copy
@@ -12,6 +12,7 @@ import logging
 import re
 import time
 import uuid
+import secrets
 from pathlib import Path
 from contextlib import asynccontextmanager
 
@@ -611,6 +612,81 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="AI Gateway", lifespan=lifespan)
 
+
+@app.middleware("http")
+async def service_authentication(request: Request, call_next):
+    """Optional shared service token; configure it when exposing the model API."""
+    token = os.environ.get("AI_GATEWAY_SERVICE_TOKEN")
+    if request.url.path.startswith("/v1/") and token:
+        supplied = request.headers.get("authorization", "")
+        if not secrets.compare_digest(supplied.encode(), f"Bearer {token}".encode()):
+            return JSONResponse(status_code=401, content={"error": {"message": "Invalid service token"}})
+    return await call_next(request)
+
+
+@app.post("/v1/embeddings")
+async def embeddings(request: Request):
+    """Pinned embedding routing: never fall back to an incompatible vector space."""
+    started_at = time.perf_counter()
+    request_id = _request_id_from(request)
+    attribution = _attribution_from(request)
+    model = None
+    resolved_model = None
+    status_code = 400
+    usage = None
+    error_type = "validation_error"
+    try:
+        try:
+            body = await request.json()
+        except ValueError:
+            raise HTTPException(400, "Invalid JSON") from None
+        allowed_fields = {'model', 'input', 'encoding_format', 'dimensions', 'user'}
+        if not isinstance(body, dict) or set(body) - allowed_fields:
+            raise HTTPException(400, "Unsupported embedding parameters")
+        model = body.get('model')
+        models = config.get('embedding_models', {})
+        if not isinstance(model, str) or model not in models:
+            raise HTTPException(400, "Unsupported embedding model")
+        resolved_model = models[model]
+        inputs = body.get('input')
+        # RAG contract accepts text or batches of text. Token arrays are not supported.
+        if not (isinstance(inputs, str) and inputs.strip() or
+                isinstance(inputs, list) and inputs and
+                all(isinstance(item, str) and item.strip() for item in inputs)):
+            raise HTTPException(400, "input must be nonempty text or a nonempty text batch")
+        if body.get('encoding_format', 'float') not in ('float', 'base64'):
+            raise HTTPException(400, "Unsupported encoding_format")
+        if 'dimensions' in body and (type(body['dimensions']) is not int or body['dimensions'] < 1):
+            raise HTTPException(400, "dimensions must be a positive integer")
+        response = await asyncio.wait_for(litellm.aembedding(
+            model=resolved_model, **{key: value for key, value in body.items() if key != 'model'},
+        ), timeout=_provider_timeout_seconds())
+        usage = _usage_from_response(response)
+        status_code = 200
+        error_type = None
+        return JSONResponse(content=_response_as_dict(response), headers={'x-request-id': request_id})
+    except HTTPException:
+        raise
+    except Exception as exc:
+        error_type = type(exc).__name__
+        status_code = 504 if isinstance(exc, TimeoutError) else 502
+        if isinstance(exc, litellm.exceptions.RateLimitError):
+            status_code = 429
+        elif isinstance(exc, litellm.exceptions.BadRequestError):
+            status_code = 400
+        raise HTTPException(status_code, "Embedding provider request failed") from None
+    finally:
+        await _send_observability_metric(
+            request_id=request_id, resolved_model=resolved_model, started_at=started_at,
+            status='success' if status_code == 200 else 'error', usage=usage,
+            error_type=error_type, attribution=attribution,
+        )
+        logger.info(json.dumps({'event': 'embedding_request', 'request_id': request_id,
+            'consumer': attribution['consumer'], 'model': model, 'resolved_model': resolved_model,
+            'policy': _evaluate_consumer_policy(attribution['consumer'], model),
+            'status_code': status_code, 'usage': usage, 'error_type': error_type,
+            'duration_seconds': time.perf_counter() - started_at}))
+
 # CORS middleware
 app.add_middleware(
     CORSMiddleware,
@@ -649,7 +725,7 @@ async def list_models():
         "object": "list",
         "data": [
             {"id": model_name, "object": "model", "created": 1700000000, "owned_by": "ai-gateway"}
-            for model_name in available_models
+            for model_name in dict.fromkeys([*available_models, *config.get('embedding_models', {})])
         ]
     }
 
