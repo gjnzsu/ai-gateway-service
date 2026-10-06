@@ -87,6 +87,8 @@ Consumer services do not need direct provider API keys when calls go through the
 
 ## Observability
 
+An opt-in agent FinOps experiment can also export metadata-only, non-streaming provider-attempt observations to a separately self-hosted Langfuse backend. It groups calls by agent and run IDs while retaining `X-Request-ID` for request correlation. The local digest-pinned Langfuse stack and synthetic ingestion path are verified; a controlled provider-backed market-briefing run remains the rollout acceptance gate. See [Agent FinOps Langfuse POC](docs/agent-finops-langfuse-poc.md).
+
 Each `/v1/chat/completions` request emits one structured JSON log event with metadata such as:
 
 - `request_id`
