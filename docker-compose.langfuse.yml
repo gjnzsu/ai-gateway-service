@@ -1,0 +1,136 @@
+name: agent-finops-poc
+
+x-langfuse-environment: &langfuse-environment
+  NEXTAUTH_URL: http://localhost:3300
+  DATABASE_URL: postgresql://postgres:${FINOPS_POSTGRES_PASSWORD}@postgres:5432/postgres
+  SALT: ${FINOPS_SALT}
+  ENCRYPTION_KEY: ${FINOPS_ENCRYPTION_KEY}
+  TELEMETRY_ENABLED: "false"
+  LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES: "false"
+  LANGFUSE_MIGRATION_V4_WRITE_MODE: events_only
+  CLICKHOUSE_MIGRATION_URL: clickhouse://clickhouse:9000
+  CLICKHOUSE_URL: http://clickhouse:8123
+  CLICKHOUSE_USER: clickhouse
+  CLICKHOUSE_PASSWORD: ${FINOPS_CLICKHOUSE_PASSWORD}
+  CLICKHOUSE_CLUSTER_ENABLED: "false"
+  REDIS_HOST: redis
+  REDIS_PORT: "6379"
+  REDIS_AUTH: ${FINOPS_REDIS_PASSWORD}
+  REDIS_TLS_ENABLED: "false"
+  LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+  LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
+  LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: ${FINOPS_MINIO_USER}
+  LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: ${FINOPS_MINIO_PASSWORD}
+  LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://minio:9000
+  LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+  LANGFUSE_S3_EVENT_UPLOAD_PREFIX: events/
+  LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: langfuse
+  LANGFUSE_S3_MEDIA_UPLOAD_REGION: auto
+  LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: ${FINOPS_MINIO_USER}
+  LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: ${FINOPS_MINIO_PASSWORD}
+  LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://minio:9000
+  LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: "true"
+  LANGFUSE_S3_MEDIA_UPLOAD_PREFIX: media/
+  LANGFUSE_S3_BATCH_EXPORT_ENABLED: "false"
+
+x-storage-dependencies: &storage-dependencies
+  postgres:
+    condition: service_healthy
+  clickhouse:
+    condition: service_healthy
+  redis:
+    condition: service_healthy
+  minio:
+    condition: service_healthy
+
+services:
+  langfuse-web:
+    image: docker.langfuse.com/langfuse/langfuse@sha256:3d2ae888a0e6edb41fdba6e7d5baca5e4baede3a870dac7970dadd9d925b018e
+    restart: unless-stopped
+    depends_on: *storage-dependencies
+    ports:
+      - 127.0.0.1:3300:3000
+    environment:
+      <<: *langfuse-environment
+      NEXTAUTH_SECRET: ${FINOPS_NEXTAUTH_SECRET}
+      LANGFUSE_INIT_ORG_ID: agent-finops-poc
+      LANGFUSE_INIT_ORG_NAME: Agent FinOps POC
+      LANGFUSE_INIT_PROJECT_ID: agent-finops-poc
+      LANGFUSE_INIT_PROJECT_NAME: Agent FinOps POC
+      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: ${FINOPS_LANGFUSE_PUBLIC_KEY}
+      LANGFUSE_INIT_PROJECT_SECRET_KEY: ${FINOPS_LANGFUSE_SECRET_KEY}
+      LANGFUSE_INIT_USER_EMAIL: ${FINOPS_ADMIN_EMAIL}
+      LANGFUSE_INIT_USER_NAME: FinOps Local Admin
+      LANGFUSE_INIT_USER_PASSWORD: ${FINOPS_ADMIN_PASSWORD}
+
+  langfuse-worker:
+    image: docker.langfuse.com/langfuse/langfuse-worker@sha256:52f7fd41ded2f1a6acab13ff7cb1832d36dfe2cbf44adea402b7a09cfa4ce800
+    restart: unless-stopped
+    depends_on: *storage-dependencies
+    environment: *langfuse-environment
+
+  postgres:
+    image: postgres@sha256:d74eeac9a635390a49bc21bd49fccd973de707e2a53a76ac49b552b8712ec46f
+    restart: unless-stopped
+    environment:
+      POSTGRES_PASSWORD: ${FINOPS_POSTGRES_PASSWORD}
+    volumes:
+      - finops-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -U postgres]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  clickhouse:
+    image: clickhouse/clickhouse-server@sha256:8a790dd3468db22b1d4e7b18a176f378ff5ff6053b9c48dd4ea1fa71a24c5ba6
+    restart: unless-stopped
+    environment:
+      CLICKHOUSE_DB: default
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: ${FINOPS_CLICKHOUSE_PASSWORD}
+    volumes:
+      - finops-clickhouse:/var/lib/clickhouse
+      - finops-clickhouse-logs:/var/log/clickhouse-server
+    healthcheck:
+      test: [CMD-SHELL, wget --no-verbose --tries=1 --spider http://localhost:8123/ping]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis@sha256:17e1d479466f88e2d8fe48f21f44aba1572bf3bbc207be16b09870072b83b005
+    restart: unless-stopped
+    command: [redis-server, --requirepass, "${FINOPS_REDIS_PASSWORD}", --maxmemory-policy, noeviction]
+    environment:
+      REDISCLI_AUTH: ${FINOPS_REDIS_PASSWORD}
+    volumes:
+      - finops-redis:/data
+    healthcheck:
+      test: [CMD-SHELL, redis-cli ping]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  minio:
+    image: ${FINOPS_MINIO_IMAGE:-cgr.dev/chainguard/minio@sha256:4cf4831a2bbcf13ddca09c1cbcc9faff716dd3c4247e0babc32864b8ee8e0034}
+    restart: unless-stopped
+    entrypoint: sh
+    command: -c 'mkdir -p /data/langfuse && minio server --address ":9000" --console-address ":9001" /data'
+    environment:
+      MINIO_ROOT_USER: ${FINOPS_MINIO_USER}
+      MINIO_ROOT_PASSWORD: ${FINOPS_MINIO_PASSWORD}
+    volumes:
+      - finops-minio:/data
+    healthcheck:
+      test: [CMD-SHELL, mc ready local]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  finops-postgres:
+  finops-clickhouse:
+  finops-clickhouse-logs:
+  finops-redis:
+  finops-minio:

@@ -24,6 +24,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 import uvicorn
 import litellm
 from litellm import acompletion
+from app import finops
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -394,7 +395,7 @@ def _candidate_model_aliases(model_alias):
     return candidates
 
 
-async def _call_provider_with_reliability(*, model_alias, messages, stream, extra_kwargs):
+async def _call_provider_with_reliability(*, model_alias, messages, stream, extra_kwargs, finops_context=None):
     primary_resolved_model = model_alias_to_litellm_model.get(model_alias, model_alias)
     last_error = None
     attempt_count = 0
@@ -406,6 +407,7 @@ async def _call_provider_with_reliability(*, model_alias, messages, stream, extr
 
         for attempt_number in range(_max_attempts()):
             attempt_count += 1
+            provider_started_at = time.time()
             try:
                 response = await asyncio.wait_for(
                     acompletion(
@@ -416,6 +418,7 @@ async def _call_provider_with_reliability(*, model_alias, messages, stream, extr
                     ),
                     timeout=_provider_timeout_seconds(),
                 )
+                finops.capture(finops_context, resolved_model, response, provider_started_at, time.time(), "success")
                 _record_model_success(resolved_model)
                 return response, {
                     "selected_model_alias": candidate_alias,
@@ -431,6 +434,7 @@ async def _call_provider_with_reliability(*, model_alias, messages, stream, extr
                     else "disabled",
                 }
             except Exception as exc:
+                finops.capture(finops_context, resolved_model, None, provider_started_at, time.time(), "error", type(exc).__name__)
                 last_error = exc
                 _record_model_failure(resolved_model)
                 if attempt_number < _max_attempts() - 1:
@@ -607,7 +611,11 @@ required_env_vars = sorted(
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     print(f"AI Gateway starting with models: {available_models}")
-    yield
+    finops.initialize()
+    try:
+        yield
+    finally:
+        finops.shutdown()
 
 
 app = FastAPI(title="AI Gateway", lifespan=lifespan)
@@ -850,6 +858,7 @@ async def chat_completions(request: Request):
                 messages=provider_messages,
                 stream=False,
                 extra_kwargs=extra_kwargs,
+                finops_context=finops.request_context(request.headers, stream),
             )
             resolved_model = reliability["selected_resolved_model"]
             if _enforce_enabled() and _response_has_blocked_content(response):
