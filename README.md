@@ -401,10 +401,26 @@ The tests run against the FastAPI app in-process. They do not require a local Uv
 
 ## Architecture
 
-![Runtime component architecture](docs/architecture/runtime-component-architecture.drawio.png)
+![Runtime component architecture with Langfuse FinOps telemetry](docs/architecture/runtime-component-architecture.drawio.png)
+
+The diagram shows the production inference path and the isolated FinOps observation path:
+
+```text
+AI Market Studio -> Kong Gateway -> AI Gateway -> LiteLLM SDK -> model provider
+                                           |
+                                           +-> metadata-only telemetry -> self-hosted Langfuse
+```
+
+`X-Request-ID` remains request correlation. AI Market Studio supplies a stable
+`X-AI-Agent-ID` and a fresh `X-AI-Run-ID` per workflow execution so the gateway
+can group multiple model calls and provider attempts into one agent-run cost view.
+Langfuse is an asynchronous telemetry destination and does not receive or proxy
+model traffic. Streaming and embeddings remain outside this initial POC.
 
 The editable source is available at
 [docs/architecture/runtime-component-architecture.drawio](docs/architecture/runtime-component-architecture.drawio).
+Deployment, privacy, pricing, validation, and rollback details are documented in
+[Agent FinOps Langfuse POC](docs/agent-finops-langfuse-poc.md).
 
 ## File Structure
 
